@@ -1,0 +1,92 @@
+######################################################################################
+# Pipeline: NGINX Plus Ingress Controller with NGINX App Protect container image     # 
+# Date: 2 Dec 2020                                                                   #
+# NGINX Plus Ingress version: v1.9.1                                                 #
+######################################################################################
+stages:
+  - build
+  - security_scan
+  - commit_repo
+
+variables:
+  ## Variable to build nginx-plus docker image with NGINX App Protect
+  APP_NAME: nginx-plus-ingress
+  CI_REGISTRY_IMAGE: apps/$APP_NAME
+  HARBOR_REGISTRY: reg.foobz.com.au
+  FEATURESET: appprotect/DockerfileWithAppProtectForPlus
+  #FEATURESET: DockerfileForPlus
+  VERSION: 1.9.1
+  TAG: $CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA-$VERSION
+  CD_GIT_REPOSITORY_NAP: gitlab.foobz.com.au/fbchan/nginx-plus-ingress.git
+
+  ### Variable to commit code to nginx-ingress kubernetes deployment.
+  CD_GIT_REPOSITORY: gitlab.foobz.com.au/fbchan/my-kubernetes-apps.git
+  CD_GIT_REPOSITORY_PA_TOKEN: $CI_GITLAB_PA_TOKEN
+  CD_REPO: nginx-ingress
+  CD_MANIFEST_FILE: 08_nginx-ingress-nginx-plus-ingress-with-AP-dp.yaml 
+  
+
+before_script:
+  - echo $HARBOR_REGISTRY/$CI_REGISTRY_IMAGE:$TAG $PWD 
+  # login
+  - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $HARBOR_REGISTRY
+
+## Temporary commented to speed up image build
+#after_script:
+#  - docker image prune -af
+
+########################################################
+# Build Nginx Plus Ingress + App Protect Docker image  #
+########################################################
+build_and_push_image:
+  stage: build
+  script:
+    # Docker Build && Push image. 
+    - git clone https://github.com/nginxinc/kubernetes-ingress/
+    - cd kubernetes-ingress/deployments
+    - git checkout v$VERSION
+    - cd ..
+    - pwd
+    - cp ../nginx-repo.* .
+    #- sed -i '/ENTRYPOINT.*/i ENV TZ=Australia/Melbourne\nRUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone' build/appprotect/DockerfileWithAppProtectForPlus
+    - make DOCKERFILE=$FEATURESET PREFIX=$HARBOR_REGISTRY/$CI_REGISTRY_IMAGE VERSION=$TAG
+
+########################################################
+# Security Image scans for vulnerabilities             #
+# Intentionally allow the CI/CD pipeline to proceed    #
+########################################################
+scan_image:
+  stage: security_scan
+  allow_failure: true
+  script:
+    # Fail on Critical or Hight vulnerabilities
+    # --exit-code 0 --> Pass
+    # --exit-code 1 --> Fail
+    - echo "Trivy image Security Scanning..."
+    - trivy --exit-code 0 --no-progress --severity CRITICAL,HIGH --output scan-reports/trivy_$TAG.report $HARBOR_REGISTRY/$CI_REGISTRY_IMAGE:$TAG
+    
+    # Upload trivy report back to repository for continuous security improvement 
+    - git config --global user.email "${CI_EMAIL}"
+    - git config --global user.name "${CI_USERNAME}"
+    - git add scan-reports/trivy_$TAG.report
+    - git commit -m "Trivy report from $CI_REGISTRY_IMAGE:$TAG [skip ci]" || echo "No changes, nothing to commit!"
+    - git remote rm origin && git remote add origin https://gitlab-ci-token:$CD_GIT_REPOSITORY_PA_TOKEN@$CD_GIT_REPOSITORY_NAP
+    #- git remote -v
+    - git push origin HEAD:$CI_COMMIT_REF_NAME # Pushes to the same branch as the trigger
+
+###############################################################################
+# Update nginx-ingress deployment manifest with new image tag                 #
+# Commit code changes and trigger webhook to argocd for continious deployment #
+###############################################################################
+update_nap_manifest:
+  stage: commit_repo
+  variables:
+    GIT_STRATEGY: none
+  retry: 2
+  script:
+    - rm -rf my-kubernetes-apps
+    - git clone --single-branch --branch master https://gitlab-ci-token:$CD_GIT_REPOSITORY_PA_TOKEN@$CD_GIT_REPOSITORY
+    - cd my-kubernetes-apps/$CD_REPO
+    - yq write --inplace $CD_MANIFEST_FILE spec.template.spec.containers[0].image $HARBOR_REGISTRY/$CI_REGISTRY_IMAGE:$TAG
+    - git commit -am "update nginx-plus-ingress deployment manifest" && git push origin master
+    
