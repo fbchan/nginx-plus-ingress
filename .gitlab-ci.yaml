@@ -48,7 +48,6 @@ build_and_push_image:
     - cd ..
     - pwd
     - cp ../nginx-repo.* .
-    #- sed -i '/ENTRYPOINT.*/i ENV TZ=Australia/Melbourne\nRUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone' build/appprotect/DockerfileWithAppProtectForPlus
     - make DOCKERFILE=$FEATURESET PREFIX=$HARBOR_REGISTRY/$CI_REGISTRY_IMAGE VERSION=$TAG
 
 ########################################################
